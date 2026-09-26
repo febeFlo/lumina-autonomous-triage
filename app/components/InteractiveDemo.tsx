@@ -5,6 +5,7 @@ import {
   useRef,
   useCallback,
   useState,
+  useEffect,
   type ChangeEvent,
   type DragEvent,
 } from 'react';
@@ -20,6 +21,8 @@ import {
   AlertTriangle,
   Circle,
   ChevronRight,
+  Terminal,
+  Loader,
 } from 'lucide-react';
 
 import { luminaReducer, initialState } from '@/app/store/reducer';
@@ -107,6 +110,86 @@ const STATUS_TOKENS: Record<NodeStatus, StatusTokens> = {
   VERIFYING:  { border: C.cyan,   bg: `${C.cyan}12`,   glow: `${C.cyan}30`,   label: 'Verifying',  Icon: Circle       },
   RESOLVED:   { border: C.green,  bg: `${C.green}12`,  glow: `${C.green}30`,  label: 'Resolved',   Icon: CheckCircle  },
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workflow telemetry scripts – one array of messages per stage
+// ─────────────────────────────────────────────────────────────────────────────
+interface TelemetryScript {
+  stage: string;
+  messages: ((faultFile: string, errorType: string) => string)[];
+}
+
+const TELEMETRY_SCRIPTS: TelemetryScript[] = [
+  {
+    stage: 'ANALYZING',
+    messages: [
+      (f)    => `[bob/doc-understanding] Ingesting incident log…`,
+      (f)    => `[bob/doc-understanding] Extracted stack trace frames`,
+      (f, e) => `[bob/doc-understanding] Detected error type: ${e}`,
+      (f)    => `[bob/parser] Matched fault origin → ${f}`,
+      (f)    => `[bob/parser] Mapping dependency call chain…`,
+    ],
+  },
+  {
+    stage: 'SUBAGENTS_ACTIVE',
+    messages: [
+      ()  => `[bob/plan-mode] Triage strategy computed`,
+      ()  => `[bob/subagent-a] Spawning Subagent A — API schema audit`,
+      ()  => `[bob/subagent-b] Spawning Subagent B — Database layer trace`,
+      ()  => `[bob/subagent-a] Auditing route handlers…`,
+      ()  => `[bob/subagent-b] Tracing query execution path…`,
+      ()  => `[bob/subagent-a] API schema: no contract violations found`,
+      ()  => `[bob/subagent-b] Identified unsafe data access at fault origin`,
+    ],
+  },
+  {
+    stage: 'VERIFYING',
+    messages: [
+      (f, e) => `[bob/diff-gen] Generating patch for ${e} in ${f}`,
+      ()     => `[bob/shell] Applying patch to working tree…`,
+      ()     => `[bob/shell] Executing test runner…`,
+      ()     => `[bob/shell] Test suite: running…`,
+      ()     => `[bob/shell] ✓ All tests passed — 100% pass rate`,
+      ()     => `[bob/shell] Patch approved and committed`,
+    ],
+  },
+  {
+    stage: 'RESOLVED',
+    messages: [
+      () => `[lumina] Incident resolved — circuit restored to healthy state`,
+      () => `[lumina] MTTR: ~45s  ·  Token waste: 0  ·  Tests: 100%`,
+    ],
+  },
+];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Async helpers — character-by-character typing stream
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Resolves after `ms` milliseconds. Used between characters and between messages. */
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Streams a single message string into the provided setter character-by-character
+ * at `charDelay` ms per character.  Checks `cancelled()` before every character
+ * so the caller can abort mid-stream by flipping a ref.
+ */
+async function streamMessage(
+  message: string,
+  onChar: (partial: string) => void,
+  cancelled: () => boolean,
+  charDelay = 17,
+): Promise<void> {
+  let built = '';
+  for (const ch of message) {
+    if (cancelled()) return;
+    built += ch;
+    onChar(built);
+    await wait(charDelay);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small reusable primitives
@@ -229,6 +312,26 @@ function DiffLine({ line }: { line: string }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Sub-component: a single committed telemetry line in the terminal
+// ─────────────────────────────────────────────────────────────────────────────
+function TerminalLine({ line }: { line: string }) {
+  // Colour-code by prefix token
+  let textColor = 'rgba(255,255,255,0.55)';
+  if (line.includes('[bob/shell] ✓') || line.includes('[lumina]'))  textColor = '#80FFB2'; // green
+  if (line.includes('[bob/subagent'))                               textColor = '#FFD580'; // amber-ish
+  if (line.includes('error') || line.includes('Fault'))            textColor = '#FF8099'; // red
+
+  return (
+    <div className="flex items-start gap-2 py-0.5">
+      <span className="shrink-0 select-none text-[10px]" style={{ color: 'rgba(255,255,255,0.2)' }}>$</span>
+      <span className="text-[11px] leading-relaxed" style={{ color: textColor }}>
+        {line}
+      </span>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main component
 // ─────────────────────────────────────────────────────────────────────────────
 export default function InteractiveDemo() {
@@ -240,13 +343,22 @@ export default function InteractiveDemo() {
   const [githubLoading, setGithubLoading] = useLocalState(false);
   const [logDragOver, setLogDragOver]     = useLocalState(false);
 
-  const fileInputRef   = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
+  // Telemetry terminal: committed lines + the currently-streaming partial line
+  const [termLines, setTermLines]         = useLocalState<string[]>([]);
+  const [streamingLine, setStreamingLine] = useLocalState<string>('');
+  const [isRunning, setIsRunning]         = useLocalState(false);
+
+  const fileInputRef    = useRef<HTMLInputElement>(null);
+  const folderInputRef  = useRef<HTMLInputElement>(null);
+  const termScrollRef   = useRef<HTMLDivElement>(null);
+  // cancelRef: flipped to true to abort a running workflow
+  const cancelRef       = useRef(false);
 
   // ── Derived shorthand ──────────────────────────────────────────────────────
-  const { nodes, rawLog, incident, activeDiff } = state;
-  const hasRepo = nodes.length > 0;
-  const hasLog  = !!rawLog;
+  const { nodes, rawLog, incident, activeDiff, stage } = state;
+  const hasRepo    = nodes.length > 0;
+  const hasLog     = !!rawLog;
+  const isResolved = stage === 'RESOLVED';
 
   // ── Helper: run parse + dispatch after log is set ─────────────────────────
   const processLog = useCallback(
@@ -369,8 +481,77 @@ export default function InteractiveDemo() {
     [handleLogFile]
   );
 
-  // ── Reset ──────────────────────────────────────────────────────────────────
+  // ── Workflow runner ────────────────────────────────────────────────────────
+  /**
+   * Async state-machine runner.  Walks through all four post-IDLE stages,
+   * streaming telemetry for each one, then dispatching ADVANCE_STAGE.
+   * Uses `cancelRef` instead of nested setTimeouts so cleanup is trivial.
+   */
+  const runWorkflow = useCallback(async () => {
+    if (!incident || isRunning) return;
+
+    cancelRef.current = false;
+    setIsRunning(true);
+
+    // Keep a mutable local copy of committed lines so the closure
+    // never needs a functional setter (useLocalState returns plain setter).
+    const committed: string[] = [];
+    setTermLines([]);
+    setStreamingLine('');
+
+    const { faultFile, errorType } = incident;
+
+    // Commit the current streaming partial and start a new line
+    const commitLine = (line: string) => {
+      committed.push(line);
+      setTermLines([...committed]);
+      setStreamingLine('');
+    };
+
+    // Stream one message, then commit it
+    const emitMessage = async (msg: string) => {
+      await streamMessage(msg, setStreamingLine, () => cancelRef.current);
+      if (!cancelRef.current) commitLine(msg);
+    };
+
+    // Walk each stage script in order
+    for (const script of TELEMETRY_SCRIPTS) {
+      if (cancelRef.current) break;
+
+      // Advance the reducer stage before streaming that stage's messages
+      dispatch({ type: 'ADVANCE_STAGE' });
+
+      // For VERIFYING we also need the diff to exist before resolving
+      if (script.stage === 'VERIFYING' && incident) {
+        const diff = generateDiff(faultFile, errorType, incident.lineNumber);
+        dispatch({ type: 'SET_DIFF', payload: diff });
+      }
+
+      for (const msgFn of script.messages) {
+        if (cancelRef.current) break;
+        await emitMessage(msgFn(faultFile, errorType));
+        await wait(80);  // brief pause between messages — not nested, just sequential
+      }
+
+      // Pause between stages so the user can see node colour transitions
+      await wait(300);
+    }
+
+    if (!cancelRef.current) setIsRunning(false);
+  }, [incident, isRunning, dispatch]);
+
+  // ── Auto-scroll terminal container (not the page) to its bottom ───────────
+  useEffect(() => {
+    const el = termScrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [termLines, streamingLine]);
+
+  // ── Cancel workflow on reset ───────────────────────────────────────────────
   const handleReset = useCallback(() => {
+    cancelRef.current = true;
+    setIsRunning(false);
+    setTermLines([]);
+    setStreamingLine('');
     dispatch({ type: 'RESET' });
     setGithubError(null);
     setGithubUrl('');
@@ -561,7 +742,43 @@ export default function InteractiveDemo() {
           {/* ── Divider ──────────────────────────────────────────────────── */}
           <div className="border-t" style={{ borderColor: C.border }} />
 
-          {/* ── E. Status strip + Reset ───────────────────────────────────── */}
+          {/* ── E. Run Workflow button ────────────────────────────────────── */}
+          {incident && !isRunning && stage === 'IDLE' && (
+            <button
+              onClick={runWorkflow}
+              className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-bold transition-all hover:opacity-90 active:scale-95"
+              style={{
+                background: C.cyan,
+                color:      '#0E1117',
+                boxShadow:  `0 0 16px ${C.cyan}44`,
+              }}
+            >
+              <Play size={13} aria-hidden="true" />
+              Run Autonomous Triage
+            </button>
+          )}
+
+          {isRunning && (
+            <div
+              className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold"
+              style={{ background: `${C.amber}14`, color: C.amber, border: `1px solid ${C.amber}30` }}
+            >
+              <Loader size={12} className="animate-spin" aria-hidden="true" />
+              Triage in progress…
+            </div>
+          )}
+
+          {isResolved && (
+            <div
+              className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-bold"
+              style={{ background: `${C.green}14`, color: C.green, border: `1px solid ${C.green}30` }}
+            >
+              <CheckCircle size={13} aria-hidden="true" />
+              INCIDENT RESOLVED
+            </div>
+          )}
+
+          {/* ── F. Status strip + Reset ───────────────────────────────────── */}
           <div className="mt-auto flex items-center justify-between gap-3">
             <div className="text-xs" style={{ color: C.muted }}>
               {!hasRepo && !hasLog && 'Awaiting input…'}
@@ -575,11 +792,16 @@ export default function InteractiveDemo() {
                   <span style={{ color: C.amber }}>◎</span> Parsing log…
                 </span>
               )}
-              {incident && (
+              {incident && stage === 'IDLE' && (
                 <span>
                   <span style={{ color: C.red }}>✕</span>{' '}
                   Fault: <span style={{ fontFamily: 'var(--font-mono)', color: C.red }}>{incident.faultFile}</span>
                   {' '}· line {incident.lineNumber}
+                </span>
+              )}
+              {stage !== 'IDLE' && stage !== 'RESOLVED' && (
+                <span style={{ color: C.amber }}>
+                  Stage: <span style={{ fontFamily: 'var(--font-mono)' }}>{stage}</span>
                 </span>
               )}
             </div>
@@ -665,6 +887,77 @@ export default function InteractiveDemo() {
         </PanelCard>
 
         {/* ════════════════════════════════════════════════════════════════════
+            PANEL 2b — Telemetry Terminal (between nodes and diff on desktop;
+            full-width row below the left panel on mobile)
+        ═══════════════════════════════════════════════════════════════════ */}
+        {(isRunning || termLines.length > 0) && (
+          <PanelCard className="flex flex-col p-5 xl:col-start-2">
+            {/* Header */}
+            <div className="mb-3 flex items-center gap-2">
+              <Terminal size={13} style={{ color: C.cyan }} aria-hidden="true" />
+              <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                Live Telemetry
+              </p>
+              {isRunning && (
+                <span
+                  className="ml-auto flex items-center gap-1 text-[10px]"
+                  style={{ color: C.amber }}
+                >
+                  <span
+                    className="h-1.5 w-1.5 animate-pulse rounded-full"
+                    style={{ background: C.amber }}
+                    aria-hidden="true"
+                  />
+                  streaming
+                </span>
+              )}
+              {isResolved && (
+                <span
+                  className="ml-auto flex items-center gap-1 text-[10px] font-bold"
+                  style={{ color: C.green }}
+                >
+                  <CheckCircle size={10} aria-hidden="true" />
+                  complete
+                </span>
+              )}
+            </div>
+
+            {/* Terminal body — overflow-y-auto here, never on the page */}
+            <div
+              ref={termScrollRef}
+              className="flex-1 overflow-y-auto rounded-xl border p-3"
+              style={{
+                background:  C.bg,
+                borderColor: C.border,
+                minHeight:   '160px',
+                maxHeight:   '260px',
+                fontFamily:  'var(--font-mono, monospace)',
+              }}
+            >
+              {/* Committed lines */}
+              {termLines.map((line, i) => (
+                <TerminalLine key={i} line={line} />
+              ))}
+
+              {/* Currently-streaming partial line */}
+              {streamingLine && (
+                <div className="flex items-start gap-2 py-0.5">
+                  <span className="shrink-0 select-none text-[10px]" style={{ color: C.mutedLow }}>$</span>
+                  <span className="text-[11px] leading-relaxed" style={{ color: C.cyan }}>
+                    {streamingLine}
+                    <span
+                      className="inline-block w-1.5 animate-pulse"
+                      style={{ background: C.cyan, height: '0.75em', verticalAlign: 'middle' }}
+                      aria-hidden="true"
+                    />
+                  </span>
+                </div>
+              )}
+            </div>
+          </PanelCard>
+        )}
+
+        {/* ════════════════════════════════════════════════════════════════════
             PANEL 3 — RIGHT BOTTOM: Git Diff Inspector
         ═══════════════════════════════════════════════════════════════════ */}
         <PanelCard className="flex flex-col p-5">
@@ -673,7 +966,7 @@ export default function InteractiveDemo() {
             <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
               Git Diff Inspector
             </p>
-            {activeDiff && (
+            {isResolved && activeDiff && (
               <span
                 className="flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider"
                 style={{
@@ -696,7 +989,7 @@ export default function InteractiveDemo() {
             >
               <Play size={24} style={{ color: C.mutedLow }} aria-hidden="true" />
               <p className="text-xs" style={{ color: C.mutedLow }}>
-                Load a repository and an incident log<br />to generate an autonomous patch.
+                Load a repository and an incident log,<br />then run the triage to generate a patch.
               </p>
             </div>
           )}
@@ -707,7 +1000,7 @@ export default function InteractiveDemo() {
               {/* Metadata row */}
               <div
                 className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2.5 text-xs"
-                style={{ background: `${C.bg}`, borderColor: C.border }}
+                style={{ background: C.bg, borderColor: C.border }}
               >
                 <span style={{ color: C.muted }}>
                   <span style={{ color: C.cyan, fontFamily: 'var(--font-mono, monospace)' }}>
