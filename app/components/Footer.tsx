@@ -64,7 +64,7 @@ export default function Footer() {
               Resources
             </p>
             <a
-              href="https://github.com"
+              href="https://github.com/febeFlo/lumina-autonomous-triage"
               target="_blank"
               rel="noopener noreferrer"
               className="flex items-center gap-2 text-sm transition-colors hover:text-white"
@@ -111,8 +111,8 @@ export default function Footer() {
                 </span>
               </div>
               <p className="text-xs leading-relaxed" style={{ color: 'rgba(255,255,255,0.4)' }}>
-                Built with IBM Bob 2.0 — leveraging Document Understanding,
-                Plan Mode, Parallel Subagents, and Bob Shell Execution.
+                Built with IBM Bob 2.0 — leveraging repository intelligence, dependency analysis, 
+                stack trace correlation, and code-aware remediation workflows.
               </p>
             </div>
           </div>

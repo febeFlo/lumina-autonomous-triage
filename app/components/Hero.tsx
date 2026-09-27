@@ -54,7 +54,7 @@ export default function Hero() {
             style={{ background: '#00F0FF' }}
             aria-hidden="true"
           />
-          Powered by IBM Bob 2.0 Subagents &amp; Bob Shell
+          Powered by IBM Bob 2.0 Code Intelligence
         </span>
 
         {/* ── Headline ─────────────────────────────────────────────────────── */}
@@ -79,9 +79,9 @@ export default function Hero() {
 
         {/* ── Value proposition ────────────────────────────────────────────── */}
         <p className="max-w-2xl text-base leading-relaxed sm:text-lg" style={{ color: 'rgba(255,255,255,0.6)' }}>
-          Lumina ingests raw logs, maps your repository graph, and deploys parallel
-          IBM Bob 2.0 subagents to pinpoint fault origins — autonomously patching
-          and verifying fixes via Bob Shell execution.
+          Lumina ingests repositories and incident logs, builds real dependency graphs 
+          from source code imports, correlates stack traces to actual files and lines, 
+          and generates code-aware remediation recommendations based on the affected source context.
         </p>
 
         {/* ── MTTR Callout ─────────────────────────────────────────────────── */}
@@ -101,7 +101,7 @@ export default function Hero() {
                 2.5 hrs
               </span>
               <span className="text-xs font-medium uppercase tracking-wider" style={{ color: 'rgba(255,255,255,0.4)' }}>
-                Avg MTTR Today
+                Avg Investigation Time
               </span>
             </div>
 
@@ -112,16 +112,16 @@ export default function Hero() {
                 className="block text-4xl font-black tabular-nums"
                 style={{ color: '#00FF66', textShadow: '0 0 20px rgba(0,255,102,0.4)' }}
               >
-                45 sec
+                Seconds
               </span>
               <span className="text-xs font-medium uppercase tracking-wider" style={{ color: 'rgba(255,255,255,0.4)' }}>
-                With Lumina
+                to Root Cause Discovery
               </span>
             </div>
           </div>
 
           <p className="mt-1 text-xs" style={{ color: 'rgba(255,255,255,0.35)' }}>
-            94% mean-time-to-resolution reduction via autonomous subagent orchestration
+            Accelerate incident diagnosis through repository-aware dependency analysis and source-code correlation.
           </p>
         </div>
 

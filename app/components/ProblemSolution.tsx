@@ -44,23 +44,23 @@ const PAIN_POINTS: PainPoint[] = [
 const BENEFITS: Benefit[] = [
   {
     icon: <Layers size={16} />,
-    title: 'Document Understanding Ingest',
-    description: "IBM Bob 2.0 parses raw logs like documents — extracting structured fault signals without manual preprocessing.",
+    title: 'Repository-Aware Log Analysis',
+    description: "Lumina correlates stack traces directly against uploaded repositories to identify real fault locations and dependency paths.",
   },
   {
     icon: <Search size={16} />,
-    title: 'AST Repository Ingestion',
-    description: 'Lumina maps your full codebase graph via GitHub API, identifying every dependency node in the call chain.',
+    title: 'Dependency Graph Construction',
+    description: 'Import relationships are extracted from source code to build a navigable dependency graph of the affected application.',
   },
   {
     icon: <Cpu size={16} />,
-    title: 'Parallel Subagent Isolation',
-    description: 'Two focused subagents run concurrently — one auditing the API schema, one tracing the database layer — with zero cross-contamination.',
+    title: 'Source-Code Correlation',
+    description: 'Every stack trace frame is mapped back to actual files, line numbers, and code surrounding the failure.',
   },
   {
     icon: <ShieldCheck size={16} />,
-    title: 'Bob Shell Test Verification',
-    description: 'Every generated patch is applied and validated by Bob Shell executing the full test suite before the fix is approved.',
+    title: 'Code-Aware Remediation',
+    description: 'Patch recommendations are generated from the actual source context instead of static error templates.',
   },
 ];
 
@@ -219,7 +219,7 @@ export default function ProblemSolution() {
               className="text-xl font-black tabular-nums"
               style={{ color: '#00FF66', textShadow: '0 0 12px rgba(0,255,102,0.4)' }}
             >
-              45 seconds
+              seconds
             </span>
           </div>
         </div>

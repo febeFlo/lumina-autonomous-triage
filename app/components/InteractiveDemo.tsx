@@ -5,7 +5,6 @@ import {
   useRef,
   useCallback,
   useState,
-  useEffect,
   type ChangeEvent,
   type DragEvent,
 } from 'react';
@@ -14,50 +13,75 @@ import {
   GitBranch,
   Upload,
   FileText,
-  Play,
   RotateCcw,
   CheckCircle,
   AlertCircle,
   AlertTriangle,
   Circle,
   ChevronRight,
-  Terminal,
-  Loader,
+  ShieldCheck,
+  Activity,
+  Code2,
 } from 'lucide-react';
 
 import { luminaReducer, initialState } from '@/app/store/reducer';
 import { fetchRepositoryTree } from '@/app/lib/github';
 import { parseStackTrace } from '@/app/lib/stackTraceParser';
 import { generateDiff } from '@/app/lib/diffGenerator';
-import type { RepoNode, NodeStatus } from '@/app/types/types';
+import { analyzeImports, buildIncidentReport } from '@/app/lib/dependencyAnalyzer';
+import type { RepoNode, NodeStatus, SourceFile } from '@/app/types/types';
+import CircuitGraph from './CircuitGraph';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Design tokens (inline — avoids arbitrary Tailwind class generation)
+// Design tokens
 // ─────────────────────────────────────────────────────────────────────────────
 const C = {
-  bg:        '#0E1117',
-  card:      '#161B22',
-  border:    '#30363D',
-  cyan:      '#00F0FF',
-  green:     '#00FF66',
-  amber:     '#FFB800',
-  red:       '#FF0055',
-  muted:     'rgba(255,255,255,0.45)',
-  mutedLow:  'rgba(255,255,255,0.25)',
+  bg:       '#0E1117',
+  card:     '#161B22',
+  border:   '#30363D',
+  cyan:     '#00F0FF',
+  green:    '#00FF66',
+  amber:    '#FFB800',
+  red:      '#FF0055',
+  muted:    'rgba(255,255,255,0.45)',
+  mutedLow: 'rgba(255,255,255,0.25)',
 } as const;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Preset data
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Sample repository – the PRD-prescribed microservice preset */
 const SAMPLE_NODES: RepoNode[] = [
-  { id: 'main.py',     label: 'main.py',     path: 'main.py',     status: 'HEALTHY', x: 0.5,  y: 0.15 },
-  { id: 'routes.py',  label: 'routes.py',  path: 'routes.py',  status: 'HEALTHY', x: 0.2,  y: 0.45 },
-  { id: 'database.py',label: 'database.py',path: 'database.py',status: 'HEALTHY', x: 0.8,  y: 0.45 },
-  { id: 'auth.py',    label: 'auth.py',    path: 'auth.py',    status: 'HEALTHY', x: 0.2,  y: 0.78 },
-  { id: 'config.py',  label: 'config.py',  path: 'config.py',  status: 'HEALTHY', x: 0.8,  y: 0.78 },
+  { id: 'main.py',      label: 'main.py',      path: 'main.py',      status: 'UNKNOWN', x: 0.5,  y: 0.15 },
+  { id: 'routes.py',   label: 'routes.py',   path: 'routes.py',   status: 'UNKNOWN', x: 0.2,  y: 0.45 },
+  { id: 'database.py', label: 'database.py', path: 'database.py', status: 'UNKNOWN', x: 0.8,  y: 0.45 },
+  { id: 'auth.py',     label: 'auth.py',     path: 'auth.py',     status: 'UNKNOWN', x: 0.2,  y: 0.78 },
+  { id: 'config.py',   label: 'config.py',   path: 'config.py',   status: 'UNKNOWN', x: 0.8,  y: 0.78 },
 ];
+
+/** Stub source content for the sample preset — enables import edge analysis */
+const SAMPLE_SOURCE_FILES: Record<string, SourceFile> = {
+  'main.py': {
+    path: 'main.py', filename: 'main.py', extension: '.py',
+    content: `from routes import process\nfrom config import settings\n\ndef handle_request(payload):\n    result = process(payload)\n    return result\n`,
+  },
+  'routes.py': {
+    path: 'routes.py', filename: 'routes.py', extension: '.py',
+    content: `from database import get_user\nfrom auth import verify_token\n\ndef process(payload):\n    user = get_user(payload["user_id"])\n    return user\n`,
+  },
+  'database.py': {
+    path: 'database.py', filename: 'database.py', extension: '.py',
+    content: `from config import settings\n\ndb = {}\n\ndef get_user(key):\n    return db[key]\n`,
+  },
+  'auth.py': {
+    path: 'auth.py', filename: 'auth.py', extension: '.py',
+    content: `from config import settings\n\ndef verify_token(token):\n    return settings.secret == token\n`,
+  },
+  'config.py': {
+    path: 'config.py', filename: 'config.py', extension: '.py',
+    content: `class Settings:\n    secret = "lumina"\n\nsettings = Settings()\n`,
+  },
+};
 
 interface PresetLog { label: string; log: string }
 
@@ -104,92 +128,13 @@ interface StatusTokens {
 }
 
 const STATUS_TOKENS: Record<NodeStatus, StatusTokens> = {
-  HEALTHY:    { border: C.green,  bg: `${C.green}12`,  glow: `${C.green}30`,  label: 'Healthy',    Icon: CheckCircle  },
-  FAULT:      { border: C.red,    bg: `${C.red}12`,    glow: `${C.red}40`,    label: 'Fault',      Icon: AlertCircle  },
-  DEPENDENCY: { border: C.amber,  bg: `${C.amber}12`,  glow: `${C.amber}30`,  label: 'Dependency', Icon: AlertTriangle },
-  VERIFYING:  { border: C.cyan,   bg: `${C.cyan}12`,   glow: `${C.cyan}30`,   label: 'Verifying',  Icon: Circle       },
-  RESOLVED:   { border: C.green,  bg: `${C.green}12`,  glow: `${C.green}30`,  label: 'Resolved',   Icon: CheckCircle  },
+  UNKNOWN:    { border: '#4A5568', bg: 'rgba(74,85,104,0.14)', glow: 'rgba(74,85,104,0.2)',  label: 'Unknown',    Icon: Circle        },
+  HEALTHY:    { border: C.green,   bg: `${C.green}12`,         glow: `${C.green}30`,          label: 'Healthy',    Icon: CheckCircle   },
+  FAULT:      { border: C.red,     bg: `${C.red}12`,           glow: `${C.red}40`,            label: 'Fault',      Icon: AlertCircle   },
+  DEPENDENCY: { border: C.amber,   bg: `${C.amber}12`,         glow: `${C.amber}30`,          label: 'Dependency', Icon: AlertTriangle },
+  VERIFYING:  { border: C.cyan,    bg: `${C.cyan}12`,          glow: `${C.cyan}30`,           label: 'Verifying',  Icon: Circle        },
+  RESOLVED:   { border: C.green,   bg: `${C.green}12`,         glow: `${C.green}30`,          label: 'Resolved',   Icon: CheckCircle   },
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Workflow telemetry scripts – one array of messages per stage
-// ─────────────────────────────────────────────────────────────────────────────
-interface TelemetryScript {
-  stage: string;
-  messages: ((faultFile: string, errorType: string) => string)[];
-}
-
-const TELEMETRY_SCRIPTS: TelemetryScript[] = [
-  {
-    stage: 'ANALYZING',
-    messages: [
-      (f)    => `[bob/doc-understanding] Ingesting incident log…`,
-      (f)    => `[bob/doc-understanding] Extracted stack trace frames`,
-      (f, e) => `[bob/doc-understanding] Detected error type: ${e}`,
-      (f)    => `[bob/parser] Matched fault origin → ${f}`,
-      (f)    => `[bob/parser] Mapping dependency call chain…`,
-    ],
-  },
-  {
-    stage: 'SUBAGENTS_ACTIVE',
-    messages: [
-      ()  => `[bob/plan-mode] Triage strategy computed`,
-      ()  => `[bob/subagent-a] Spawning Subagent A — API schema audit`,
-      ()  => `[bob/subagent-b] Spawning Subagent B — Database layer trace`,
-      ()  => `[bob/subagent-a] Auditing route handlers…`,
-      ()  => `[bob/subagent-b] Tracing query execution path…`,
-      ()  => `[bob/subagent-a] API schema: no contract violations found`,
-      ()  => `[bob/subagent-b] Identified unsafe data access at fault origin`,
-    ],
-  },
-  {
-    stage: 'VERIFYING',
-    messages: [
-      (f, e) => `[bob/diff-gen] Generating patch for ${e} in ${f}`,
-      ()     => `[bob/shell] Applying patch to working tree…`,
-      ()     => `[bob/shell] Executing test runner…`,
-      ()     => `[bob/shell] Test suite: running…`,
-      ()     => `[bob/shell] ✓ All tests passed — 100% pass rate`,
-      ()     => `[bob/shell] Patch approved and committed`,
-    ],
-  },
-  {
-    stage: 'RESOLVED',
-    messages: [
-      () => `[lumina] Incident resolved — circuit restored to healthy state`,
-      () => `[lumina] MTTR: ~45s  ·  Token waste: 0  ·  Tests: 100%`,
-    ],
-  },
-];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Async helpers — character-by-character typing stream
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** Resolves after `ms` milliseconds. Used between characters and between messages. */
-function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Streams a single message string into the provided setter character-by-character
- * at `charDelay` ms per character.  Checks `cancelled()` before every character
- * so the caller can abort mid-stream by flipping a ref.
- */
-async function streamMessage(
-  message: string,
-  onChar: (partial: string) => void,
-  cancelled: () => boolean,
-  charDelay = 17,
-): Promise<void> {
-  let built = '';
-  for (const ch of message) {
-    if (cancelled()) return;
-    built += ch;
-    onChar(built);
-    await wait(charDelay);
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Small reusable primitives
@@ -215,46 +160,12 @@ function PanelCard({ children, className = '' }: { children: React.ReactNode; cl
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-component: single repository node card
-// ─────────────────────────────────────────────────────────────────────────────
-function NodeCard({ node }: { node: RepoNode }) {
-  const tok = STATUS_TOKENS[node.status];
-  return (
-    <div
-      className="flex items-center gap-2.5 rounded-xl border px-3 py-2.5 transition-all duration-300"
-      style={{
-        background:  tok.bg,
-        borderColor: tok.border,
-        boxShadow:   `0 0 10px ${tok.glow}`,
-      }}
-    >
-      <tok.Icon size={13} color={tok.border} aria-hidden="true" />
-      <span
-        className="flex-1 truncate text-xs font-semibold text-white"
-        style={{ fontFamily: 'var(--font-mono, monospace)' }}
-      >
-        {node.label}
-      </span>
-      <span
-        className="shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider"
-        style={{ background: `${tok.border}22`, color: tok.border }}
-      >
-        {tok.label}
-      </span>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Sub-component: diff line renderer
 // ─────────────────────────────────────────────────────────────────────────────
 function DiffLine({ line }: { line: string }) {
   if (line.startsWith('---') || line.startsWith('+++')) {
     return (
-      <div
-        className="px-3 py-0.5 text-xs"
-        style={{ color: C.muted, fontFamily: 'var(--font-mono, monospace)' }}
-      >
+      <div className="px-3 py-0.5 text-xs" style={{ color: C.muted, fontFamily: 'var(--font-mono, monospace)' }}>
         {line}
       </div>
     );
@@ -263,11 +174,7 @@ function DiffLine({ line }: { line: string }) {
     return (
       <div
         className="px-3 py-1 text-xs"
-        style={{
-          color: C.cyan,
-          background: `${C.cyan}0A`,
-          fontFamily: 'var(--font-mono, monospace)',
-        }}
+        style={{ color: C.cyan, background: `${C.cyan}0A`, fontFamily: 'var(--font-mono, monospace)' }}
       >
         {line}
       </div>
@@ -277,11 +184,7 @@ function DiffLine({ line }: { line: string }) {
     return (
       <div
         className="px-3 py-0.5 text-xs"
-        style={{
-          color: '#FF8099',
-          background: 'rgba(255,0,85,0.12)',
-          fontFamily: 'var(--font-mono, monospace)',
-        }}
+        style={{ color: '#FF8099', background: 'rgba(255,0,85,0.12)', fontFamily: 'var(--font-mono, monospace)' }}
       >
         {line}
       </div>
@@ -291,43 +194,32 @@ function DiffLine({ line }: { line: string }) {
     return (
       <div
         className="px-3 py-0.5 text-xs"
-        style={{
-          color: '#80FFB2',
-          background: 'rgba(0,255,102,0.10)',
-          fontFamily: 'var(--font-mono, monospace)',
-        }}
+        style={{ color: '#80FFB2', background: 'rgba(0,255,102,0.10)', fontFamily: 'var(--font-mono, monospace)' }}
       >
         {line}
       </div>
     );
   }
   return (
-    <div
-      className="px-3 py-0.5 text-xs"
-      style={{ color: C.muted, fontFamily: 'var(--font-mono, monospace)' }}
-    >
+    <div className="px-3 py-0.5 text-xs" style={{ color: C.muted, fontFamily: 'var(--font-mono, monospace)' }}>
       {line || '\u00A0'}
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sub-component: a single committed telemetry line in the terminal
+// Sub-component: confidence badge (uses the string label from IncidentReport)
 // ─────────────────────────────────────────────────────────────────────────────
-function TerminalLine({ line }: { line: string }) {
-  // Colour-code by prefix token
-  let textColor = 'rgba(255,255,255,0.55)';
-  if (line.includes('[bob/shell] ✓') || line.includes('[lumina]'))  textColor = '#80FFB2'; // green
-  if (line.includes('[bob/subagent'))                               textColor = '#FFD580'; // amber-ish
-  if (line.includes('error') || line.includes('Fault'))            textColor = '#FF8099'; // red
-
+function ConfidenceBadge({ label, score }: { label: 'HIGH' | 'MEDIUM' | 'LOW'; score: number }) {
+  const color = label === 'HIGH' ? C.green : label === 'MEDIUM' ? C.amber : C.red;
   return (
-    <div className="flex items-start gap-2 py-0.5">
-      <span className="shrink-0 select-none text-[10px]" style={{ color: 'rgba(255,255,255,0.2)' }}>$</span>
-      <span className="text-[11px] leading-relaxed" style={{ color: textColor }}>
-        {line}
-      </span>
-    </div>
+    <span
+      className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+      style={{ borderColor: `${color}40`, background: `${color}14`, color }}
+    >
+      <ShieldCheck size={9} aria-hidden="true" />
+      Confidence : {label} · {score}%
+    </span>
   );
 }
 
@@ -338,36 +230,28 @@ export default function InteractiveDemo() {
   const [state, dispatch] = useReducer(luminaReducer, initialState);
 
   // ── Local UI state ─────────────────────────────────────────────────────────
-  const [githubUrl, setGithubUrl]         = useLocalState('');
-  const [githubError, setGithubError]     = useLocalState<string | null>(null);
-  const [githubLoading, setGithubLoading] = useLocalState(false);
-  const [logDragOver, setLogDragOver]     = useLocalState(false);
+  const [githubUrl, setGithubUrl]         = useState('');
+  const [githubError, setGithubError]     = useState<string | null>(null);
+  const [githubLoading, setGithubLoading] = useState(false);
+  const [logDragOver, setLogDragOver]     = useState(false);
 
-  // Telemetry terminal: committed lines + the currently-streaming partial line
-  const [termLines, setTermLines]         = useLocalState<string[]>([]);
-  const [streamingLine, setStreamingLine] = useLocalState<string>('');
-  const [isRunning, setIsRunning]         = useLocalState(false);
-
-  const fileInputRef    = useRef<HTMLInputElement>(null);
-  const folderInputRef  = useRef<HTMLInputElement>(null);
-  const termScrollRef   = useRef<HTMLDivElement>(null);
-  // cancelRef: flipped to true to abort a running workflow
-  const cancelRef       = useRef(false);
+  const fileInputRef   = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   // ── Derived shorthand ──────────────────────────────────────────────────────
-  const { nodes, rawLog, incident, activeDiff, stage } = state;
+  const { nodes, rawLog, incident, activeDiff, stage, importEdges, incidentReport } = state;
   const hasRepo    = nodes.length > 0;
   const hasLog     = !!rawLog;
+  const isAnalyzed = stage === 'ANALYZED';
   const isResolved = stage === 'RESOLVED';
 
-  // ── Helper: run parse + dispatch after log is set ─────────────────────────
+  // ── Helper: parse log, dispatch fault + report ────────────────────────────
   const processLog = useCallback(
-    (logText: string, nodeList: RepoNode[]) => {
+    (logText: string, nodeList: RepoNode[], sourceFiles: Record<string, SourceFile>) => {
       const filenames = nodeList.map((n) => n.label);
       const parsed = parseStackTrace(logText, filenames);
       if (!parsed) return;
 
-      // Find the matching node id for the fault file
       const faultNode = nodeList.find(
         (n) => n.label === parsed.faultFile || n.path.includes(parsed.faultFile)
       );
@@ -375,8 +259,28 @@ export default function InteractiveDemo() {
         dispatch({ type: 'SET_FAULT', payload: { incident: parsed, faultNodeId: faultNode.id } });
       }
 
-      const diff = generateDiff(parsed.faultFile, parsed.errorType, parsed.lineNumber);
+      // Locate the source file so both diff + report can read real content
+      const sfEntry = Object.entries(sourceFiles).find(
+        ([path, sf]) =>
+          (sf as SourceFile).filename === parsed.faultFile ||
+          path.includes(parsed.faultFile)
+      );
+      const sf = sfEntry ? (sfEntry[1] as SourceFile) : null;
+
+      // Diff is generated from actual source context, not from the error type
+      const diff = generateDiff(
+        parsed.faultFile,
+        parsed.lineNumber,
+        sf,
+        parsed.language
+      );
       dispatch({ type: 'SET_DIFF', payload: diff });
+
+      // buildIncidentReport runs its own classification + confidence internally
+      const report = buildIncidentReport(parsed, sourceFiles);
+      dispatch({ type: 'SET_INCIDENT_REPORT', payload: report });
+
+      dispatch({ type: 'MARK_REMAINING_HEALTHY' });
     },
     []
   );
@@ -389,7 +293,9 @@ export default function InteractiveDemo() {
     try {
       const fetched = await fetchRepositoryTree(githubUrl.trim());
       dispatch({ type: 'SET_REPOSITORY', payload: { source: githubUrl.trim(), nodes: fetched } });
-      if (rawLog) processLog(rawLog, fetched);
+      // GitHub API path-only: dispatch empty source files (no content available)
+      dispatch({ type: 'SET_SOURCE_FILES', payload: { sourceFiles: {}, importEdges: [] } });
+      if (rawLog) processLog(rawLog, fetched, {});
     } catch (err) {
       setGithubError(err instanceof Error ? err.message : 'Unknown error fetching repository.');
     } finally {
@@ -398,56 +304,95 @@ export default function InteractiveDemo() {
   }, [githubUrl, rawLog, processLog]);
 
   // ── Local folder ingestion ─────────────────────────────────────────────────
-  const handleFolderUpload = useCallback((e: ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    if (files.length === 0) return;
+  const handleFolderUpload = useCallback(
+    (e: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(e.target.files ?? []);
+      if (files.length === 0) return;
 
-    const SOURCE_EXT = ['.py', '.ts', '.js', '.go', '.java'];
-    const sourceFiles = files
-      .filter((f) => SOURCE_EXT.some((ext) => f.name.endsWith(ext)))
-      .slice(0, 10);
+      const SOURCE_EXT = ['.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.java'];
+      const sourceFileList = files
+        .filter((f) => SOURCE_EXT.some((ext) => f.name.endsWith(ext)))
+        .slice(0, 10);
 
-    if (sourceFiles.length === 0) return;
+      if (sourceFileList.length === 0) return;
 
-    // Distribute nodes in a grid layout (same logic as github.ts)
-    const cols  = Math.ceil(Math.sqrt(sourceFiles.length));
-    const rows  = Math.ceil(sourceFiles.length / cols);
-    const built: RepoNode[] = sourceFiles.map((f, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      return {
-        id:     f.webkitRelativePath || f.name,
-        label:  f.name,
-        path:   f.webkitRelativePath || f.name,
-        status: 'HEALTHY',
-        x:      cols > 1 ? 0.1 + (col / (cols - 1)) * 0.8 : 0.5,
-        y:      rows > 1 ? 0.1 + (row / (rows - 1)) * 0.8 : 0.5,
+      const cols = Math.ceil(Math.sqrt(sourceFileList.length));
+      const rows = Math.ceil(sourceFileList.length / cols);
+      const built: RepoNode[] = sourceFileList.map((f, i) => {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        return {
+          id:     f.webkitRelativePath || f.name,
+          label:  f.name,
+          path:   f.webkitRelativePath || f.name,
+          status: 'UNKNOWN',
+          x:      cols > 1 ? 0.1 + (col / (cols - 1)) * 0.8 : 0.5,
+          y:      rows > 1 ? 0.1 + (row / (rows - 1)) * 0.8 : 0.5,
+        };
+      });
+
+      const source = sourceFileList[0].webkitRelativePath
+        ? sourceFileList[0].webkitRelativePath.split('/')[0]
+        : 'Local Upload';
+
+      dispatch({ type: 'SET_REPOSITORY', payload: { source, nodes: built } });
+
+      // Read all file contents via FileReader, then analyze imports
+      const ext = (name: string) => {
+        const dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.slice(dot) : '';
       };
-    });
 
-    const source = sourceFiles[0].webkitRelativePath
-      ? sourceFiles[0].webkitRelativePath.split('/')[0]
-      : 'Local Upload';
+      let pending = sourceFileList.length;
+      const sfMap: Record<string, SourceFile> = {};
 
-    dispatch({ type: 'SET_REPOSITORY', payload: { source, nodes: built } });
-    if (rawLog) processLog(rawLog, built);
-    // Reset the input so the same folder can be re-selected
-    e.target.value = '';
-  }, [rawLog, processLog]);
+      const onAllRead = () => {
+        const edges = analyzeImports(sfMap);
+        dispatch({ type: 'SET_SOURCE_FILES', payload: { sourceFiles: sfMap, importEdges: edges } });
+        if (rawLog) processLog(rawLog, built, sfMap);
+      };
+
+      for (const f of sourceFileList) {
+        const path = f.webkitRelativePath || f.name;
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          sfMap[path] = {
+            path,
+            filename: f.name,
+            extension: ext(f.name),
+            content: (ev.target?.result as string) ?? '',
+          };
+          pending -= 1;
+          if (pending === 0) onAllRead();
+        };
+        reader.onerror = () => {
+          sfMap[path] = { path, filename: f.name, extension: ext(f.name), content: '' };
+          pending -= 1;
+          if (pending === 0) onAllRead();
+        };
+        reader.readAsText(f);
+      }
+
+      e.target.value = '';
+    },
+    [rawLog, processLog]
+  );
 
   // ── Sample repository preset ───────────────────────────────────────────────
   const handleSampleRepo = useCallback(() => {
     dispatch({ type: 'SET_REPOSITORY', payload: { source: 'sample-microservice', nodes: SAMPLE_NODES } });
-    if (rawLog) processLog(rawLog, SAMPLE_NODES);
+    const edges = analyzeImports(SAMPLE_SOURCE_FILES);
+    dispatch({ type: 'SET_SOURCE_FILES', payload: { sourceFiles: SAMPLE_SOURCE_FILES, importEdges: edges } });
+    if (rawLog) processLog(rawLog, SAMPLE_NODES, SAMPLE_SOURCE_FILES);
   }, [rawLog, processLog]);
 
-  // ── Log ingestion helpers ──────────────────────────────────────────────────
+  // ── Log ingestion ──────────────────────────────────────────────────────────
   const ingestLog = useCallback(
     (text: string) => {
       dispatch({ type: 'SET_LOG', payload: { rawLog: text } });
-      processLog(text, nodes);
+      processLog(text, nodes, state.sourceFiles);
     },
-    [nodes, processLog]
+    [nodes, state.sourceFiles, processLog]
   );
 
   const handleLogFile = useCallback(
@@ -481,77 +426,8 @@ export default function InteractiveDemo() {
     [handleLogFile]
   );
 
-  // ── Workflow runner ────────────────────────────────────────────────────────
-  /**
-   * Async state-machine runner.  Walks through all four post-IDLE stages,
-   * streaming telemetry for each one, then dispatching ADVANCE_STAGE.
-   * Uses `cancelRef` instead of nested setTimeouts so cleanup is trivial.
-   */
-  const runWorkflow = useCallback(async () => {
-    if (!incident || isRunning) return;
-
-    cancelRef.current = false;
-    setIsRunning(true);
-
-    // Keep a mutable local copy of committed lines so the closure
-    // never needs a functional setter (useLocalState returns plain setter).
-    const committed: string[] = [];
-    setTermLines([]);
-    setStreamingLine('');
-
-    const { faultFile, errorType } = incident;
-
-    // Commit the current streaming partial and start a new line
-    const commitLine = (line: string) => {
-      committed.push(line);
-      setTermLines([...committed]);
-      setStreamingLine('');
-    };
-
-    // Stream one message, then commit it
-    const emitMessage = async (msg: string) => {
-      await streamMessage(msg, setStreamingLine, () => cancelRef.current);
-      if (!cancelRef.current) commitLine(msg);
-    };
-
-    // Walk each stage script in order
-    for (const script of TELEMETRY_SCRIPTS) {
-      if (cancelRef.current) break;
-
-      // Advance the reducer stage before streaming that stage's messages
-      dispatch({ type: 'ADVANCE_STAGE' });
-
-      // For VERIFYING we also need the diff to exist before resolving
-      if (script.stage === 'VERIFYING' && incident) {
-        const diff = generateDiff(faultFile, errorType, incident.lineNumber);
-        dispatch({ type: 'SET_DIFF', payload: diff });
-      }
-
-      for (const msgFn of script.messages) {
-        if (cancelRef.current) break;
-        await emitMessage(msgFn(faultFile, errorType));
-        await wait(80);  // brief pause between messages — not nested, just sequential
-      }
-
-      // Pause between stages so the user can see node colour transitions
-      await wait(300);
-    }
-
-    if (!cancelRef.current) setIsRunning(false);
-  }, [incident, isRunning, dispatch]);
-
-  // ── Auto-scroll terminal container (not the page) to its bottom ───────────
-  useEffect(() => {
-    const el = termScrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [termLines, streamingLine]);
-
-  // ── Cancel workflow on reset ───────────────────────────────────────────────
+  // ── Reset ──────────────────────────────────────────────────────────────────
   const handleReset = useCallback(() => {
-    cancelRef.current = true;
-    setIsRunning(false);
-    setTermLines([]);
-    setStreamingLine('');
     dispatch({ type: 'RESET' });
     setGithubError(null);
     setGithubUrl('');
@@ -561,7 +437,7 @@ export default function InteractiveDemo() {
   // Render
   // ──────────────────────────────────────────────────────────────────────────
   return (
-    <section className="mx-auto w-full max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
+    <section id="demo" className="mx-auto w-full max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
 
       {/* ── Section header ─────────────────────────────────────────────────── */}
       <div className="mb-8 text-center">
@@ -572,19 +448,21 @@ export default function InteractiveDemo() {
           Live Triage Dashboard
         </h2>
         <p className="mx-auto mt-3 max-w-xl text-sm" style={{ color: C.muted }}>
-          Ingest a repository and a log file to watch Lumina identify the fault origin, map dependency nodes, and generate an autonomous patch.
+          Ingest a repository and an incident log. Lumina builds a real dependency graph, 
+          traces fault origins to specific files and lines, and generates context-aware 
+          remediation recommendations from the affected source code.
         </p>
       </div>
 
       {/* ── 3-panel grid ───────────────────────────────────────────────────── */}
       <div className="grid gap-4 lg:grid-cols-[1fr_1fr] xl:grid-cols-[420px_1fr]">
 
-        {/* ════════════════════════════════════════════════════════════════════
-            PANEL 1 — LEFT: Ingestion
-        ═══════════════════════════════════════════════════════════════════ */}
+        {/* ═══════════════════════════════════════════════════════════════════
+            PANEL 1 — LEFT: Ingestion Controls
+        ══════════════════════════════════════════════════════════════════ */}
         <PanelCard className="flex flex-col gap-6 p-5 lg:row-span-2">
 
-          {/* ── A. GitHub URL ─────────────────────────────────────────────── */}
+          {/* A. GitHub URL */}
           <div>
             <SectionLabel>
               <GitBranch size={10} className="inline mr-1" aria-hidden="true" />
@@ -620,7 +498,7 @@ export default function InteractiveDemo() {
             )}
           </div>
 
-          {/* ── B. Local Folder Upload ────────────────────────────────────── */}
+          {/* B. Local Folder Upload */}
           <div>
             <SectionLabel>
               <FolderOpen size={10} className="inline mr-1" aria-hidden="true" />
@@ -636,7 +514,6 @@ export default function InteractiveDemo() {
               Choose Folder…
             </button>
 
-            {/* Hidden folder input — webkitdirectory + directory + multiple */}
             <input
               ref={folderInputRef}
               type="file"
@@ -650,7 +527,7 @@ export default function InteractiveDemo() {
             />
           </div>
 
-          {/* ── C. Sample Preset ─────────────────────────────────────────── */}
+          {/* C. Sample Preset */}
           <div>
             <SectionLabel>Preset Repository</SectionLabel>
             <button
@@ -664,16 +541,15 @@ export default function InteractiveDemo() {
             >
               <ChevronRight size={12} aria-hidden="true" />
               Use Sample Microservice Repo
-              <span className="ml-auto text-[10px] opacity-50 font-mono">
+              <span className="ml-auto text-[10px] opacity-50" style={{ fontFamily: 'var(--font-mono, monospace)' }}>
                 main · routes · database · auth · config
               </span>
             </button>
           </div>
 
-          {/* ── Divider ──────────────────────────────────────────────────── */}
           <div className="border-t" style={{ borderColor: C.border }} />
 
-          {/* ── D. Log Ingestion ──────────────────────────────────────────── */}
+          {/* D. Log Ingestion */}
           <div>
             <SectionLabel>
               <FileText size={10} className="inline mr-1" aria-hidden="true" />
@@ -687,10 +563,10 @@ export default function InteractiveDemo() {
               aria-label="Drop a .log or .txt file here"
               className="mb-3 flex flex-col items-center justify-center gap-1.5 rounded-xl border py-6 text-center text-xs transition-all cursor-pointer"
               style={{
-                borderStyle:  'dashed',
-                borderColor:  logDragOver ? C.cyan : C.border,
-                background:   logDragOver ? `${C.cyan}08` : 'transparent',
-                color:        logDragOver ? C.cyan : C.muted,
+                borderStyle: 'dashed',
+                borderColor: logDragOver ? C.cyan : C.border,
+                background:  logDragOver ? `${C.cyan}08` : 'transparent',
+                color:       logDragOver ? C.cyan : C.muted,
               }}
               onDragOver={(e) => { e.preventDefault(); setLogDragOver(true); }}
               onDragLeave={() => setLogDragOver(false)}
@@ -719,7 +595,7 @@ export default function InteractiveDemo() {
                   onClick={() => ingestLog(log)}
                   className="flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium transition-all hover:-translate-y-px"
                   style={{
-                    background:  rawLog === log ? `${C.amber}12` : `${C.card}`,
+                    background:  rawLog === log ? `${C.amber}12` : C.card,
                     borderColor: rawLog === log ? `${C.amber}50` : C.border,
                     color:       rawLog === log ? C.amber : 'rgba(255,255,255,0.6)',
                   }}
@@ -739,46 +615,19 @@ export default function InteractiveDemo() {
             </div>
           </div>
 
-          {/* ── Divider ──────────────────────────────────────────────────── */}
-          <div className="border-t" style={{ borderColor: C.border }} />
+          {/* ── Supported languages note ──────────────────────────────────── */}
+          <div
+            className="rounded-xl border px-3 py-2.5 text-[11px] leading-relaxed"
+            style={{ borderColor: `${C.cyan}20`, background: `${C.cyan}06`, color: 'rgba(255,255,255,0.45)' }}
+          >
+            <span className="font-bold" style={{ color: C.cyan }}>Supported languages: </span>
+            Python · JavaScript · TypeScript · Go · Java
+            <span className="block mt-0.5 text-[10px]" style={{ color: 'rgba(255,255,255,0.25)' }}>
+              Stack traces are parsed for all five. Import edges require source content (local folder upload).
+            </span>
+          </div>
 
-          {/* ── E. Run Workflow button ────────────────────────────────────── */}
-          {incident && !isRunning && stage === 'IDLE' && (
-            <button
-              onClick={runWorkflow}
-              className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-bold transition-all hover:opacity-90 active:scale-95"
-              style={{
-                background: C.cyan,
-                color:      '#0E1117',
-                boxShadow:  `0 0 16px ${C.cyan}44`,
-              }}
-            >
-              <Play size={13} aria-hidden="true" />
-              Run Autonomous Triage
-            </button>
-          )}
-
-          {isRunning && (
-            <div
-              className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-semibold"
-              style={{ background: `${C.amber}14`, color: C.amber, border: `1px solid ${C.amber}30` }}
-            >
-              <Loader size={12} className="animate-spin" aria-hidden="true" />
-              Triage in progress…
-            </div>
-          )}
-
-          {isResolved && (
-            <div
-              className="flex w-full items-center justify-center gap-2 rounded-lg py-2.5 text-xs font-bold"
-              style={{ background: `${C.green}14`, color: C.green, border: `1px solid ${C.green}30` }}
-            >
-              <CheckCircle size={13} aria-hidden="true" />
-              INCIDENT RESOLVED
-            </div>
-          )}
-
-          {/* ── F. Status strip + Reset ───────────────────────────────────── */}
+          {/* F. Status strip + Reset */}
           <div className="mt-auto flex items-center justify-between gap-3">
             <div className="text-xs" style={{ color: C.muted }}>
               {!hasRepo && !hasLog && 'Awaiting input…'}
@@ -792,16 +641,17 @@ export default function InteractiveDemo() {
                   <span style={{ color: C.amber }}>◎</span> Parsing log…
                 </span>
               )}
-              {incident && stage === 'IDLE' && (
+              {incident && isAnalyzed && (
                 <span>
                   <span style={{ color: C.red }}>✕</span>{' '}
-                  Fault: <span style={{ fontFamily: 'var(--font-mono)', color: C.red }}>{incident.faultFile}</span>
+                  Fault:{' '}
+                  <span style={{ fontFamily: 'var(--font-mono)', color: C.red }}>{incident.faultFile}</span>
                   {' '}· line {incident.lineNumber}
                 </span>
               )}
-              {stage !== 'IDLE' && stage !== 'RESOLVED' && (
-                <span style={{ color: C.amber }}>
-                  Stage: <span style={{ fontFamily: 'var(--font-mono)' }}>{stage}</span>
+              {isResolved && (
+                <span style={{ color: C.green }}>
+                  All nodes healthy
                 </span>
               )}
             </div>
@@ -818,15 +668,14 @@ export default function InteractiveDemo() {
           </div>
         </PanelCard>
 
-        {/* ════════════════════════════════════════════════════════════════════
-            PANEL 2 — RIGHT TOP: Repository Nodes
-        ═══════════════════════════════════════════════════════════════════ */}
-        <PanelCard className="flex flex-col p-5">
-          {/* Panel header */}
-          <div className="mb-4 flex items-center justify-between">
+        {/* ═══════════════════════════════════════════════════════════════════
+            PANEL 2 — RIGHT TOP: Dynamic Circuit Canvas
+        ══════════════════════════════════════════════════════════════════ */}
+        <PanelCard className="flex flex-col overflow-hidden p-0">
+          <div className="flex items-center justify-between px-5 pt-4 pb-3">
             <div>
               <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
-                Repository Nodes
+                AST Dependency Graph
               </p>
               {state.repositorySource && (
                 <p
@@ -837,217 +686,266 @@ export default function InteractiveDemo() {
                 </p>
               )}
             </div>
-            <span
-              className="rounded-full px-2 py-0.5 text-[10px] font-bold tabular-nums"
-              style={{ background: `${C.cyan}14`, color: C.cyan }}
-            >
-              {nodes.length} nodes
-            </span>
+            <div className="flex items-center gap-2">
+              {importEdges.length > 0 && (
+                <span
+                  className="rounded-full px-2 py-0.5 text-[10px] font-bold tabular-nums"
+                  style={{ background: `${C.amber}14`, color: C.amber }}
+                >
+                  {importEdges.length} import edges
+                </span>
+              )}
+              <span
+                className="rounded-full px-2 py-0.5 text-[10px] font-bold tabular-nums"
+                style={{ background: `${C.cyan}14`, color: C.cyan }}
+              >
+                {nodes.length} nodes
+              </span>
+            </div>
           </div>
 
-          {/* Empty state */}
-          {nodes.length === 0 && (
-            <div
-              className="flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border py-12 text-center"
-              style={{ borderColor: C.border, borderStyle: 'dashed' }}
-            >
-              <GitBranch size={24} style={{ color: C.mutedLow }} aria-hidden="true" />
-              <p className="text-xs" style={{ color: C.mutedLow }}>
-                Load a GitHub repo, upload a folder,<br />or use the sample preset.
-              </p>
-            </div>
-          )}
-
-          {/* Node grid */}
-          {nodes.length > 0 && (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {nodes.map((node) => (
-                <NodeCard key={node.id} node={node} />
-              ))}
-            </div>
-          )}
-
-          {/* Legend */}
-          {nodes.length > 0 && (
-            <div className="mt-4 flex flex-wrap gap-3">
-              {(
-                [
-                  ['HEALTHY',    C.green, 'Healthy'],
-                  ['FAULT',      C.red,   'Fault'],
-                  ['DEPENDENCY', C.amber, 'Dependency'],
-                ] as [NodeStatus, string, string][]
-              ).map(([, color, label]) => (
-                <span key={label} className="flex items-center gap-1.5 text-[10px]" style={{ color: C.mutedLow }}>
-                  <span className="h-1.5 w-1.5 rounded-full" style={{ background: color }} aria-hidden="true" />
-                  {label}
-                </span>
-              ))}
-            </div>
-          )}
+          <CircuitGraph
+            nodes={nodes}
+            faultFile={incident?.faultFile}
+            dependencyFiles={incident?.dependencyFiles}
+            stage={stage}
+            importEdges={importEdges}
+          />
         </PanelCard>
 
-        {/* ════════════════════════════════════════════════════════════════════
-            PANEL 2b — Telemetry Terminal (between nodes and diff on desktop;
-            full-width row below the left panel on mobile)
-        ═══════════════════════════════════════════════════════════════════ */}
-        {(isRunning || termLines.length > 0) && (
-          <PanelCard className="flex flex-col p-5 xl:col-start-2">
-            {/* Header */}
-            <div className="mb-3 flex items-center gap-2">
-              <Terminal size={13} style={{ color: C.cyan }} aria-hidden="true" />
-              <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
-                Live Telemetry
-              </p>
-              {isRunning && (
-                <span
-                  className="ml-auto flex items-center gap-1 text-[10px]"
-                  style={{ color: C.amber }}
-                >
-                  <span
-                    className="h-1.5 w-1.5 animate-pulse rounded-full"
-                    style={{ background: C.amber }}
-                    aria-hidden="true"
-                  />
-                  streaming
-                </span>
-              )}
-              {isResolved && (
-                <span
-                  className="ml-auto flex items-center gap-1 text-[10px] font-bold"
-                  style={{ color: C.green }}
-                >
-                  <CheckCircle size={10} aria-hidden="true" />
-                  complete
-                </span>
-              )}
-            </div>
+        {/* ═══════════════════════════════════════════════════════════════════
+            PANEL 3 — RIGHT BOTTOM: Incident Report + Git Diff Inspector
+        ══════════════════════════════════════════════════════════════════ */}
+        <PanelCard className="flex flex-col gap-4 p-5">
 
-            {/* Terminal body — overflow-y-auto here, never on the page */}
-            <div
-              ref={termScrollRef}
-              className="flex-1 overflow-y-auto rounded-xl border p-3"
-              style={{
-                background:  C.bg,
-                borderColor: C.border,
-                minHeight:   '160px',
-                maxHeight:   '260px',
-                fontFamily:  'var(--font-mono, monospace)',
-              }}
-            >
-              {/* Committed lines */}
-              {termLines.map((line, i) => (
-                <TerminalLine key={i} line={line} />
-              ))}
-
-              {/* Currently-streaming partial line */}
-              {streamingLine && (
-                <div className="flex items-start gap-2 py-0.5">
-                  <span className="shrink-0 select-none text-[10px]" style={{ color: C.mutedLow }}>$</span>
-                  <span className="text-[11px] leading-relaxed" style={{ color: C.cyan }}>
-                    {streamingLine}
-                    <span
-                      className="inline-block w-1.5 animate-pulse"
-                      style={{ background: C.cyan, height: '0.75em', verticalAlign: 'middle' }}
-                      aria-hidden="true"
-                    />
-                  </span>
-                </div>
-              )}
-            </div>
-          </PanelCard>
-        )}
-
-        {/* ════════════════════════════════════════════════════════════════════
-            PANEL 3 — RIGHT BOTTOM: Git Diff Inspector
-        ═══════════════════════════════════════════════════════════════════ */}
-        <PanelCard className="flex flex-col p-5">
-          {/* Panel header */}
-          <div className="mb-4 flex items-center justify-between">
-            <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
-              Git Diff Inspector
-            </p>
-            {isResolved && activeDiff && (
-              <span
-                className="flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider"
-                style={{
-                  borderColor: `${C.green}40`,
-                  background:  `${C.green}0C`,
-                  color:        C.green,
-                }}
-              >
-                <CheckCircle size={9} aria-hidden="true" />
-                Bob Shell Approved · 100% Tests Passing
-              </span>
-            )}
-          </div>
-
-          {/* Empty state */}
-          {!activeDiff && (
-            <div
-              className="flex flex-1 flex-col items-center justify-center gap-2 rounded-xl border py-12 text-center"
-              style={{ borderColor: C.border, borderStyle: 'dashed' }}
-            >
-              <Play size={24} style={{ color: C.mutedLow }} aria-hidden="true" />
-              <p className="text-xs" style={{ color: C.mutedLow }}>
-                Load a repository and an incident log,<br />then run the triage to generate a patch.
-              </p>
-            </div>
-          )}
-
-          {/* Diff view */}
-          {activeDiff && (
+          {/* ── Incident Analysis Report ───────────────────────────────────── */}
+          {incidentReport ? (
             <div className="flex flex-col gap-3">
-              {/* Metadata row */}
+              {/* Report header */}
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <Activity size={13} style={{ color: C.red }} aria-hidden="true" />
+                  <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Incident Analysis Report
+                  </p>
+                </div>
+                <ConfidenceBadge label={incidentReport.confidence} score={incidentReport.confidenceScore} />
+              </div>
+
+              {/* Metadata grid */}
               <div
-                className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2.5 text-xs"
+                className="grid grid-cols-2 gap-2 rounded-xl border p-3 text-xs"
                 style={{ background: C.bg, borderColor: C.border }}
               >
-                <span style={{ color: C.muted }}>
-                  <span style={{ color: C.cyan, fontFamily: 'var(--font-mono, monospace)' }}>
-                    {activeDiff.filePath}
+                {/* Error type */}
+                <div>
+                  <p className="mb-0.5 text-[9px] font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Exception
+                  </p>
+                  <span
+                    className="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase"
+                    style={{ background: `${C.red}18`, color: C.red }}
+                  >
+                    {incidentReport.errorType || 'detected'}
                   </span>
-                </span>
-                <span
-                  className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase"
-                  style={{ background: `${C.red}18`, color: C.red }}
-                >
-                  {activeDiff.errorType}
-                </span>
-                <span style={{ color: C.mutedLow }}>
-                  line {activeDiff.lineNumber}
-                </span>
+                </div>
+
+                {/* Language */}
+                <div>
+                  <p className="mb-0.5 text-[9px] font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Language
+                  </p>
+                  <span
+                    className="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold uppercase"
+                    style={{ background: `${C.cyan}14`, color: C.cyan }}
+                  >
+                    {incidentReport.language}
+                  </span>
+                </div>
+
+                {/* Fault file */}
+                <div>
+                  <p className="mb-0.5 text-[9px] font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Fault File
+                  </p>
+                  <code
+                    className="text-[11px]"
+                    style={{ color: C.red, fontFamily: 'var(--font-mono, monospace)' }}
+                  >
+                    {incidentReport.faultFile}
+                  </code>
+                </div>
+
+                {/* Line number */}
+                <div>
+                  <p className="mb-0.5 text-[9px] font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Fault Line
+                  </p>
+                  <code
+                    className="text-[11px]"
+                    style={{ color: C.amber, fontFamily: 'var(--font-mono, monospace)' }}
+                  >
+                    :{incidentReport.lineNumber}
+                  </code>
+                </div>
               </div>
 
-              {/* Summary */}
-              <p className="text-xs italic" style={{ color: C.muted }}>
-                {activeDiff.summary}
-              </p>
+              {/* Fault code snippet — only when content was available */}
+              {incidentReport.faultCode && (
+                <div>
+                  <p className="mb-1 text-[9px] font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Source Context
+                  </p>
+                  <div
+                    className="overflow-x-auto rounded-xl border p-3 text-xs"
+                    style={{
+                      background:  C.bg,
+                      borderColor: `${C.red}30`,
+                      fontFamily:  'var(--font-mono, monospace)',
+                      color:        'rgba(255,255,255,0.7)',
+                      whiteSpace:  'pre',
+                    }}
+                  >
+                    {incidentReport.faultCode}
+                  </div>
+                </div>
+              )}
 
-              {/* Diff body */}
+              {/* Dependency files */}
+              {incidentReport.dependencyFiles.length > 0 && (
+                <div>
+                  <p className="mb-1 text-[9px] font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                    Upstream Callers
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {incidentReport.dependencyFiles.map((f) => (
+                      <span
+                        key={f}
+                        className="rounded-full border px-2 py-0.5 text-[10px]"
+                        style={{
+                          borderColor: `${C.amber}40`,
+                          background:  `${C.amber}0C`,
+                          color:        C.amber,
+                          fontFamily:  'var(--font-mono, monospace)',
+                        }}
+                      >
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Suggested remediation */}
               <div
-                className="overflow-x-auto overflow-y-auto rounded-xl border"
-                style={{
-                  background:  C.bg,
-                  borderColor: C.border,
-                  maxHeight:   '240px',
-                }}
+                className="flex items-start gap-2 rounded-xl border px-3 py-2.5 text-xs"
+                style={{ borderColor: `${C.green}30`, background: `${C.green}08` }}
               >
-                {activeDiff.diff.split('\n').map((line, i) => (
-                  // eslint-disable-next-line react/no-array-index-key
-                  <DiffLine key={i} line={line} />
-                ))}
+                <ShieldCheck size={12} style={{ color: C.green, marginTop: 1, flexShrink: 0 }} aria-hidden="true" />
+                <div>
+                  <p className="mb-0.5 text-[9px] font-bold uppercase tracking-widest" style={{ color: `${C.green}99` }}>
+                    Suggested Remediation
+                  </p>
+                  <p style={{ color: '#80FFB2' }}>{incidentReport.patchSummary}</p>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* Empty state for the report panel */
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Activity size={13} style={{ color: C.muted }} aria-hidden="true" />
+                <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                  Incident Analysis Report
+                </p>
+              </div>
+              <div
+                className="flex flex-col items-center justify-center gap-2 rounded-xl border py-8 text-center"
+                style={{ borderColor: C.border, borderStyle: 'dashed' }}
+              >
+                <Activity size={22} style={{ color: C.mutedLow }} aria-hidden="true" />
+                <p className="text-xs" style={{ color: C.mutedLow }}>
+                  Upload an incident log to generate<br />an autonomous analysis report.
+                </p>
               </div>
             </div>
           )}
+
+          {/* ── Git Diff Inspector ─────────────────────────────────────────── */}
+          <div>
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Code2 size={13} style={{ color: C.cyan }} aria-hidden="true" />
+                <p className="text-xs font-bold uppercase tracking-widest" style={{ color: C.muted }}>
+                  Git Diff Inspector
+                </p>
+              </div>
+              {activeDiff && isResolved && (
+                <span
+                  className="flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider"
+                  style={{ borderColor: `${C.green}40`, background: `${C.green}0C`, color: C.green }}
+                >
+                  <CheckCircle size={9} aria-hidden="true" />
+                  Bob Shell Approved · 100% Tests Passing
+                </span>
+              )}
+            </div>
+
+            {!activeDiff && (
+              <div
+                className="flex flex-col items-center justify-center gap-2 rounded-xl border py-8 text-center"
+                style={{ borderColor: C.border, borderStyle: 'dashed' }}
+              >
+                <Code2 size={22} style={{ color: C.mutedLow }} aria-hidden="true" />
+                <p className="text-xs" style={{ color: C.mutedLow }}>
+                  Patch diff will appear here<br />after log analysis.
+                </p>
+              </div>
+            )}
+
+            {activeDiff && (
+              <div className="flex flex-col gap-3">
+                {/* Metadata row */}
+                <div
+                  className="flex flex-wrap items-center gap-3 rounded-lg border px-3 py-2.5 text-xs"
+                  style={{ background: C.bg, borderColor: C.border }}
+                >
+                  <span>
+                    <code style={{ color: C.cyan, fontFamily: 'var(--font-mono, monospace)' }}>
+                      {activeDiff.filePath}
+                    </code>
+                  </span>
+                  <span
+                    className="rounded-full px-2 py-0.5 text-[9px] font-bold uppercase"
+                    style={{ background: `${C.red}18`, color: C.red }}
+                  >
+                    {activeDiff.errorType}
+                  </span>
+                  <span style={{ color: C.mutedLow }}>
+                    line {activeDiff.lineNumber}
+                  </span>
+                </div>
+
+                {/* Summary */}
+                <p className="text-xs italic" style={{ color: C.muted }}>
+                  {activeDiff.summary}
+                </p>
+
+                {/* Diff body */}
+                <div
+                  className="overflow-x-auto overflow-y-auto rounded-xl border"
+                  style={{ background: C.bg, borderColor: C.border, maxHeight: '220px' }}
+                >
+                  {activeDiff.diff.split('\n').map((line, i) => (
+                    // eslint-disable-next-line react/no-array-index-key
+                    <DiffLine key={i} line={line} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </PanelCard>
       </div>
     </section>
   );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Thin alias – useState is already imported at the top of the file
-// ─────────────────────────────────────────────────────────────────────────────
-function useLocalState<T>(initial: T): [T, (v: T) => void] {
-  return useState<T>(initial);
 }

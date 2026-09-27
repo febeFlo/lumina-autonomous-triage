@@ -18,23 +18,23 @@ const METRICS: Metric[] = [
   {
     icon: <TrendingDown size={24} />,
     accentColor: '#00FF66',
-    value: '94%',
-    label: 'Reduction in MTTR',
-    sublabel: 'From 2.5 hours → 45 seconds per incident',
+    value: 'Repo',
+    label: 'Repository-Aware',
+    sublabel: 'Maps stack traces directly to source files, lines, and dependencies',
   },
   {
     icon: <Cpu size={24} />,
     accentColor: '#00F0FF',
-    value: '0',
-    label: 'Token Waste',
-    sublabel: 'Isolated subagents eliminate context-window bloat',
+    value: 'AST',
+    label: 'Graph Construction',
+    sublabel: 'Builds dependency relationships from actual import analysis',
   },
   {
     icon: <ShieldCheck size={24} />,
     accentColor: '#FFB800',
-    value: '100%',
-    label: 'Automated Verification',
-    sublabel: 'Bob Shell test-suite gate before every patch approval',
+    value: 'Code',
+    label: 'Context-Aware',
+    sublabel: 'Remediation recommendations generated from real source context',
   },
 ];
 
@@ -117,11 +117,6 @@ export default function ImpactMetrics() {
             </div>
           ))}
         </div>
-
-        {/* ── Bottom footnote ────────────────────────────────────────────── */}
-        <p className="mt-10 text-center text-xs" style={{ color: 'rgba(255,255,255,0.2)' }}>
-          Benchmarked against industry-average manual triage workflows for Python &amp; Node.js microservices.
-        </p>
       </div>
     </section>
   );
